@@ -3,18 +3,38 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import einsum, nn
 
+# helper functions
+
+def exists(val):
+    return val is not None
+
 # normalization
 # they use layernorm without bias, something that pytorch does not offer
 
 
-class LayerNorm(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.ones(dim))
-        self.register_buffer("beta", torch.zeros(dim))
+# class LayerNorm(nn.Module):
+#     def __init__(self, dim):
+#         super().__init__()
+#         self.gamma = nn.Parameter(torch.ones(dim))
+#         self.register_buffer("beta", torch.zeros(dim))
 
-    def forward(self, x):
-        return F.layer_norm(x, x.shape[-1:], self.gamma, self.beta)
+#     def forward(self, x):
+#         return F.layer_norm(x, x.shape[-1:], self.gamma, self.beta)
+
+
+# deepnet init
+
+def deepnorm_init(transformer, beta, module_name_match_list = ['.ff_out.', '.fused_attn_ff_proj', '.to_out']):
+    for name, module in transformer.named_modules():
+        if type(module) != nn.Linear:
+            continue
+
+        needs_beta_gain = any(map(lambda substr: substr in name, module_name_match_list))
+        gain = beta if needs_beta_gain else 1
+        nn.init.xavier_normal_(module.weight.data, gain = gain)
+
+        if exists(module.bias):
+            nn.init.constant_(module.bias.data, 0)
 
 # residual
 
@@ -70,7 +90,7 @@ class GEGLU(nn.Module):
 class ParallelTransformerBlock(nn.Module):
     def __init__(self, dim, dim_head=64, heads=8, ff_mult=4):
         super().__init__()
-        self.norm = LayerNorm(dim)
+        #self.norm = LayerNorm(dim)
 
         attn_inner_dim = dim_head * heads
         ff_inner_dim = dim * ff_mult
@@ -122,7 +142,7 @@ class ParallelTransformerBlock(nn.Module):
 
         # pre layernorm
 
-        x = self.norm(x)
+        #x = self.norm(x)
 
         # attention queries, keys, values, and feedforward inner
 
@@ -177,7 +197,7 @@ def GLM(*, dim, num_tokens, depth, dim_head=64, heads=8, ff_mult=4):
             Residual(ParallelTransformerBlock(dim=dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult))
             for _ in range(depth)
         ],
-        LayerNorm(dim),
+        #LayerNorm(dim),
         nn.Linear(dim, num_tokens, bias=False)
     )
 
