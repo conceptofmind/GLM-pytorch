@@ -12,19 +12,30 @@ def exists(val):
 # they use layernorm without bias, something that pytorch does not offer
 
 
-# class LayerNorm(nn.Module):
-#     def __init__(self, dim):
-#         super().__init__()
-#         self.gamma = nn.Parameter(torch.ones(dim))
-#         self.register_buffer("beta", torch.zeros(dim))
+class LayerNorm(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.gamma = nn.Parameter(torch.ones(dim))
+        self.register_buffer("beta", torch.zeros(dim))
 
-#     def forward(self, x):
-#         return F.layer_norm(x, x.shape[-1:], self.gamma, self.beta)
+    def forward(self, x):
+        return F.layer_norm(x, x.shape[-1:], self.gamma, self.beta)
 
+class PostNorm(nn.Module):
+    def __init__(self, dim, fn, scale_residual = 1, norm_klass = LayerNorm):
+        super().__init__()
+        self.fn = fn
+        self.scale_residual = scale_residual
+        self.norm = norm_klass(dim)
+
+    def forward(self, x, *args, **kwargs):
+        residual = x * self.scale_residual
+        out = self.fn(x, *args, **kwargs) + residual
+        return self.norm(out)
 
 # deepnet init
 
-def deepnorm_init(transformer, beta, module_name_match_list = ['.ff_out.', '.fused_attn_ff_proj', '.to_out']):
+def deepnorm_init(transformer, beta, module_name_match_list = ['.ff_out.', '.fused_attn_ff_proj', '.attn_out']):
     for name, module in transformer.named_modules():
         if type(module) != nn.Linear:
             continue
@@ -140,10 +151,6 @@ class ParallelTransformerBlock(nn.Module):
 
         n, device, h = x.shape[1], x.device, self.heads
 
-        # pre layernorm
-
-        #x = self.norm(x)
-
         # attention queries, keys, values, and feedforward inner
 
         q, k, v, ff = self.fused_attn_ff_proj(x).split(self.fused_dims, dim=-1)
@@ -189,6 +196,24 @@ class ParallelTransformerBlock(nn.Module):
 
 # transformer
 
+class ParallelTransformer(nn.Module):
+    def __init__(self, dim, depth, heads, dim_head, ff_mult=4):
+        super().__init__()
+        self.layers = nn.ModuleList([])
+
+        wrapper = partial(PostNorm, dim, scale_residual = scale_residual, norm_klass = norm_klass)
+
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                Residual(ParallelTransformerBlock(dim=dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult))
+            ]))
+
+    def forward(self, x):
+        for block in self.layers:
+            x = block(x)
+        return x
+
+
 
 def GLM(*, dim, num_tokens, depth, dim_head=64, heads=8, ff_mult=4):
     net = nn.Sequential(
@@ -197,7 +222,7 @@ def GLM(*, dim, num_tokens, depth, dim_head=64, heads=8, ff_mult=4):
             Residual(ParallelTransformerBlock(dim=dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult))
             for _ in range(depth)
         ],
-        #LayerNorm(dim),
+        LayerNorm(dim),
         nn.Linear(dim, num_tokens, bias=False)
     )
 
