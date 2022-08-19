@@ -12,23 +12,14 @@ def default(val, d):
     return val if exists(val) else d
 
 # normalization
-# they use layernorm without bias, something that pytorch does not offer
-
-class LayerNorm(nn.Module):
-    def __init__(self, dim):
-        super().__init__()
-        self.gamma = nn.Parameter(torch.ones(dim))
-        self.register_buffer("beta", torch.zeros(dim))
-
-    def forward(self, x):
-        return F.layer_norm(x, x.shape[-1:], self.gamma, self.beta)
+# they use layernorm with bias, different from PaLM
 
 class PostNormResidual(nn.Module):
     def __init__(self, dim, fn, scale_residual = 1.):
         super().__init__()
         self.fn = fn
         self.scale_residual = scale_residual
-        self.norm = LayerNorm(dim)
+        self.norm = nn.LayerNorm(dim)
 
     def forward(self, x, *args, **kwargs):
         residual = x * self.scale_residual
