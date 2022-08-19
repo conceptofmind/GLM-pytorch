@@ -201,7 +201,7 @@ class ParallelTransformer(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList([])
 
-        wrapper = partial(PostNorm, dim, scale_residual = scale_residual, norm_klass = norm_klass)
+        wrapper = PostNorm, dim, scale_residual = scale_residual, norm_klass = norm_klass
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
