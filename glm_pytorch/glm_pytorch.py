@@ -8,9 +8,11 @@ from torch import einsum, nn
 def exists(val):
     return val is not None
 
+def default(val, d):
+    return val if exists(val) else d
+
 # normalization
 # they use layernorm without bias, something that pytorch does not offer
-
 
 class LayerNorm(nn.Module):
     def __init__(self, dim):
@@ -22,16 +24,17 @@ class LayerNorm(nn.Module):
         return F.layer_norm(x, x.shape[-1:], self.gamma, self.beta)
 
 class PostNormResidual(nn.Module):
-    def __init__(self, dim, fn, scale_residual = 1, norm_klass = LayerNorm):
+    def __init__(self, dim, fn, scale_residual = 1.):
         super().__init__()
         self.fn = fn
         self.scale_residual = scale_residual
-        self.norm = norm_klass(dim)
+        self.norm = LayerNorm(dim)
 
     def forward(self, x, *args, **kwargs):
         residual = x * self.scale_residual
         out = self.fn(x, *args, **kwargs) + residual
         return self.norm(out)
+
 
 # deepnet init
 
@@ -51,7 +54,6 @@ def deepnorm_init(transformer, beta, module_name_match_list = ['.ff_out.', '.fus
 # rotary positional embedding
 # https://arxiv.org/abs/2104.09864
 
-
 class RotaryEmbedding(nn.Module):
     def __init__(self, dim):
         super().__init__()
@@ -62,7 +64,6 @@ class RotaryEmbedding(nn.Module):
         seq = torch.arange(max_seq_len, device=device, dtype=self.inv_freq.dtype)
         freqs = einsum("i , j -> i j", seq, self.inv_freq)
         return torch.cat((freqs, freqs), dim=-1)
-
 
 def rotate_half(x):
     x = rearrange(x, "... (j d) -> ... j d", j=2)
@@ -86,11 +87,9 @@ class GEGLU(nn.Module):
 # parallel attention and feedforward with residual
 # discovered by Wang et al + EleutherAI from GPT-J fame
 
-
 class ParallelTransformerBlock(nn.Module):
     def __init__(self, dim, dim_head=64, heads=8, ff_mult=4):
         super().__init__()
-        #self.norm = LayerNorm(dim)
 
         attn_inner_dim = dim_head * heads
         ff_inner_dim = dim * ff_mult
@@ -186,16 +185,22 @@ class ParallelTransformerBlock(nn.Module):
 # transformer
 
 class ParallelTransformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, ff_mult=4):
+    def __init__(
+        self, 
+        dim, 
+        depth, 
+        heads, 
+        dim_head, 
+        ff_mult=4, 
+        scale_residual=1.
+    ):
         super().__init__()
         self.layers = nn.ModuleList([])
 
-        wrapper = PostNorm, dim, scale_residual = scale_residual, norm_klass = norm_klass
-
         for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                PostNormResidual(ParallelTransformerBlock(dim=dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult))
-            ]))
+            self.layers.append(
+                PostNormResidual(dim, ParallelTransformerBlock(dim=dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult), scale_residual=scale_residual)
+            )
 
     def forward(self, x):
         for block in self.layers:
@@ -203,20 +208,54 @@ class ParallelTransformer(nn.Module):
         return x
 
 
+# Model
 
-def GLM(*, dim, num_tokens, depth, dim_head=64, heads=8, ff_mult=4):
-    net = nn.Sequential(
-        nn.Embedding(num_tokens, dim),
-        *[
-            Residual(ParallelTransformerBlock(dim=dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult))
-            for _ in range(depth)
-        ],
-        LayerNorm(dim),
-        nn.Linear(dim, num_tokens, bias=False)
+class GLM(nn.Module):
+    def __init__(
+        self, 
+        dim, 
+        num_tokens, 
+        depth, 
+        dim_head=64, 
+        heads=8, 
+        ff_mult=4
+    ):
+        super().__init__()
+
+        #dec_scale_residual = default(dec_scale_residual, (3 * depth) ** 0.25)
+
+        self.net = nn.Sequential(
+            nn.Embedding(num_tokens, dim),
+            ParallelTransformer(dim=dim, depth=depth, heads=heads, dim_head=dim_head, ff_mult=ff_mult),
+            nn.Linear(dim, num_tokens, bias=False)
+        )
+
+    def forward(self, x):
+        # they used embedding weight tied projection out to logits, not common, but works
+        self.net[-1].weight = self.net[0].weight
+
+        nn.init.normal_(self.net[0].weight, std=0.02)
+        return self.net(x)
+        # out = self.embedding(x)
+        # out = self.transformer(out)
+        # out = self.linear(out)
+        # return out
+
+if __name__ == "__main__":
+
+    palm = GLM(
+        num_tokens = 20000,
+        dim = 512,
+        depth = 2,
+        heads = 8,
+        dim_head = 64,
     )
 
-    # they used embedding weight tied projection out to logits, not common, but works
-    net[-1].weight = net[0].weight
+    tokens = torch.randint(0, 20000, (1, 2048))
+    logits = palm(tokens) # (1, 2048, 20000)
 
-    nn.init.normal_(net[0].weight, std=0.02)
-    return net
+    n_params_torch = sum(
+        p.numel() for p in palm.parameters() if p.requires_grad
+    )
+
+    print(f"Number of parameters in torch model: {n_params_torch}")
