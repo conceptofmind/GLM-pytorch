@@ -21,7 +21,7 @@ class LayerNorm(nn.Module):
     def forward(self, x):
         return F.layer_norm(x, x.shape[-1:], self.gamma, self.beta)
 
-class PostNorm(nn.Module):
+class PostNormResidual(nn.Module):
     def __init__(self, dim, fn, scale_residual = 1, norm_klass = LayerNorm):
         super().__init__()
         self.fn = fn
@@ -46,17 +46,6 @@ def deepnorm_init(transformer, beta, module_name_match_list = ['.ff_out.', '.fus
 
         if exists(module.bias):
             nn.init.constant_(module.bias.data, 0)
-
-# residual
-
-
-class Residual(nn.Module):
-    def __init__(self, fn):
-        super().__init__()
-        self.fn = fn
-
-    def forward(self, x):
-        return self.fn(x) + x
 
 
 # rotary positional embedding
@@ -205,7 +194,7 @@ class ParallelTransformer(nn.Module):
 
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                Residual(ParallelTransformerBlock(dim=dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult))
+                PostNormResidual(ParallelTransformerBlock(dim=dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult))
             ]))
 
     def forward(self, x):
