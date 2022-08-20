@@ -29,7 +29,7 @@ class PostNormResidual(nn.Module):
 
 # deepnet init
 
-def deepnorm_init(transformer, beta, module_name_match_list = ['.ff_out.', '.fused_attn_ff_proj', '.attn_out']):
+def deepnorm_init(transformer, beta, module_name_match_list = ['.ff_out.', '.v_out', '.attn_out']):
     for name, module in transformer.named_modules():
         if type(module) != nn.Linear:
             continue
@@ -84,18 +84,21 @@ class ParallelTransformerBlock(nn.Module):
 
         attn_inner_dim = dim_head * heads
         ff_inner_dim = dim * ff_mult
-        self.fused_dims = (attn_inner_dim, dim_head, dim_head, (ff_inner_dim * 2))
 
         self.heads = heads
         self.scale = dim_head**-0.5
         self.rotary_emb = RotaryEmbedding(dim_head)
 
-        self.fused_attn_ff_proj = nn.Linear(dim, sum(self.fused_dims), bias=False)
-        self.attn_out = nn.Linear(attn_inner_dim, dim, bias=False)
+        self.to_q = nn.Linear(dim, attn_inner_dim, bias = False)
+        self.to_k = nn.Linear(dim, dim_head, bias=False)
+        self.to_v = nn.Linear(dim, dim_head, bias=False)
+        self.to_ff = nn.Linear(dim, ff_inner_dim * 2, bias=False)
+
+        self.attn_out = nn.Linear(attn_inner_dim, dim)
 
         self.ff_out = nn.Sequential(
             GEGLU(),
-            nn.Linear(ff_inner_dim, dim, bias=False)
+            nn.Linear(ff_inner_dim, dim)
         )
 
         # for caching causal mask and rotary embeddings
@@ -132,7 +135,7 @@ class ParallelTransformerBlock(nn.Module):
 
         # attention queries, keys, values, and feedforward inner
 
-        q, k, v, ff = self.fused_attn_ff_proj(x).split(self.fused_dims, dim=-1)
+        q, k, v, ff = self.to_q(x), self.to_k(x), self.to_v(x), self.to_ff(x)
 
         # split heads
         # they use multi-query single-key-value attention, yet another Noam Shazeer paper
@@ -218,7 +221,7 @@ class GLM(nn.Module):
         self.net = nn.Sequential(
             nn.Embedding(num_tokens, dim),
             ParallelTransformer(dim=dim, depth=depth, heads=heads, dim_head=dim_head, ff_mult=ff_mult),
-            nn.Linear(dim, num_tokens, bias=False)
+            nn.Linear(dim, num_tokens)
         )
 
     def forward(self, x):
@@ -227,26 +230,23 @@ class GLM(nn.Module):
 
         nn.init.normal_(self.net[0].weight, std=0.02)
         return self.net(x)
-        # out = self.embedding(x)
-        # out = self.transformer(out)
-        # out = self.linear(out)
-        # return out
+
 
 if __name__ == "__main__":
 
-    palm = GLM(
+    glm = GLM(
         num_tokens = 20000,
         dim = 512,
-        depth = 2,
+        depth = 1,
         heads = 8,
         dim_head = 64,
     )
 
     tokens = torch.randint(0, 20000, (1, 2048))
-    logits = palm(tokens) # (1, 2048, 20000)
+    logits = glm(tokens) # (1, 2048, 20000)
 
     n_params_torch = sum(
-        p.numel() for p in palm.parameters() if p.requires_grad
+        p.numel() for p in glm.parameters() if p.requires_grad
     )
 
     print(f"Number of parameters in torch model: {n_params_torch}")
