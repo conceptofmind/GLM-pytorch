@@ -250,25 +250,39 @@ class GLM(nn.Module):
         heads=8, 
         ff_mult=4,
         scale_residual=None,
+        use_deepnet=True,
     ):
         super().__init__()
 
-        scale_residual = default(scale_residual, (3 * depth) ** 0.25)
+        if use_deepnet:
+            scale_residual = default(scale_residual, (2 * depth) ** -0.25)
 
-        self.net = nn.Sequential(
-            nn.Embedding(num_tokens, dim),
-            Transformer(dim=dim, depth=depth, heads=heads, dim_head=dim_head, ff_mult=ff_mult, scale_residual=scale_residual),
-            nn.Linear(dim, num_tokens)
+        self.emb = nn.Embedding(num_tokens, dim)
+
+        self.transformer = Transformer(
+            dim=dim, 
+            depth=depth, 
+            heads=heads, 
+            dim_head=dim_head, 
+            ff_mult=ff_mult, 
+            scale_residual=scale_residual
         )
+        
+        self.to_logits = nn.Linear(dim, num_tokens)
 
-        deepnorm_init(self.net, (12 * depth) ** -0.25)
+        if use_deepnet:
+            deepnorm_init(self.transformer, (2 * depth) ** -0.25)
 
     def forward(self, x):
         # they used embedding weight tied projection out to logits, not common, but works
-        self.net[-1].weight = self.net[0].weight
+        self.emb.weight = self.to_logits.weight
+        nn.init.normal_(self.emb.weight, std=0.02)
 
-        nn.init.normal_(self.net[0].weight, std=0.02)
-        return self.net(x)
+        embed = self.emb(x) * 0.1 + self.emb(x).detach() * (1 - 0.1)
+        x = self.transformer(embed)
+        logits = self.to_logits(x)
+        
+        return logits
 
 
 if __name__ == "__main__":
