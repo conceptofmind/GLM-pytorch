@@ -261,15 +261,17 @@ class GLM(nn.Module):
         heads=8, 
         ff_mult=4,
         scale_residual=None,
-        use_deepnet=True,
+        use_deepnorm=True,
         alpha=0.1,
     ):
         super().__init__()
 
         self.alpha = alpha
 
-        if use_deepnet:
+        if use_deepnorm:
             scale_residual = default(scale_residual, (3 * depth) ** 0.25)
+
+        assert scale_residual is not None, 'Provide scale_residual if not using DeepNorm'
 
         self.emb = nn.Embedding(num_tokens, dim)
 
@@ -284,10 +286,10 @@ class GLM(nn.Module):
         
         self.to_logits = nn.Linear(dim, num_tokens)
 
-        if use_deepnet:
+        if use_deepnorm:
             deepnorm_init(self.transformer, (2 * depth) ** -0.25)
 
-        # they used embedding weight tied projection out to logits, not common, but works
+        # they used embedding weight tied projection out to logits
         self.emb.weight = self.to_logits.weight
         nn.init.normal_(self.emb.weight, std=0.02)
 
