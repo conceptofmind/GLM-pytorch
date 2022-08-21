@@ -29,6 +29,8 @@ class PostNormResidual(nn.Module):
 
 
 # deepnet init
+# Implementation of DeepNorm generally follows its paper: 
+# xavier normal initialization with a scaling factor is applied to ffn, v_proj, out_proj.
 
 def deepnorm_init(transformer, beta, module_name_match_list = ['.ff_out.', '.v_out', '.attn_out']):
     for name, module in transformer.named_modules():
@@ -100,6 +102,8 @@ class FeedForward(nn.Module):
 
 
 # Attention
+# Use a standard multi-head self-attention instead of sharing key/value projections.
+# all dense layer have bias.
 
 class Attention(nn.Module):
     def __init__(
@@ -194,7 +198,7 @@ class Attention(nn.Module):
         return self.attn_out(out)
 
 
-# parallel attention and feedforward with residual
+# parallel attention and feedforward
 # discovered by Wang et al + EleutherAI from GPT-J fame
 
 class ParallelBlock(nn.Module):
@@ -213,6 +217,9 @@ class ParallelBlock(nn.Module):
     def forward(self, x):
         return self.ffn(x) + self.attn(x)
 
+# transformer with residual connection and post normalization
+# optional dropout
+
 class Transformer(nn.Module):
     def __init__(
         self, 
@@ -229,7 +236,11 @@ class Transformer(nn.Module):
 
         for _ in range(depth):
             self.layers.append(
-                PostNormResidual(dim, ParallelBlock(dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult, dropout=dropout), scale_residual=scale_residual)
+                PostNormResidual(
+                    dim, 
+                    ParallelBlock(dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult, dropout=dropout), 
+                    scale_residual=scale_residual
+                )
             )
 
     def forward(self, x):
@@ -238,7 +249,7 @@ class Transformer(nn.Module):
         return x
 
 
-# Model
+# Model with deepnorm
 
 class GLM(nn.Module):
     def __init__(
@@ -274,13 +285,21 @@ class GLM(nn.Module):
             deepnorm_init(self.transformer, (2 * depth) ** -0.25)
 
     def forward(self, x):
-        # they used embedding weight tied projection out to logits, not common, but works
-        self.emb.weight = self.to_logits.weight
-        nn.init.normal_(self.emb.weight, std=0.02)
-
+        """
+        The embedding layer's gradient norm is remarkably larger than others in the early stage of training. 
+        Most collapses and spikes occur after its gradient norm surges up.
+        Since the fundamental problem is the drastic gradient of the input embedding layer, 
+        Shrink the gradient for the input embedding layer to variable alpha. 
+        embedding = embedding * alpha + embedding.detach() * (1 - alpha)
+        They found alpha=0.1 to be best for GLM-130B.
+        """
         embed = self.emb(x) * 0.1 + self.emb(x).detach() * (1 - 0.1)
         x = self.transformer(embed)
         logits = self.to_logits(x)
+
+        # they used embedding weight tied projection out to logits, not common, but works
+        self.emb.weight = self.to_logits.weight
+        nn.init.normal_(self.emb.weight, std=0.02)
         
         return logits
 
