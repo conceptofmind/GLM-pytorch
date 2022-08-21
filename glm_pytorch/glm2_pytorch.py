@@ -11,8 +11,9 @@ def exists(val):
 def default(val, d):
     return val if exists(val) else d
 
+
 # normalization
-# they use layernorm with bias, different from PaLM
+# they use layernorm with bias
 
 class PostNormResidual(nn.Module):
     def __init__(self, dim, fn, scale_residual = 1.):
@@ -81,7 +82,7 @@ class FeedForward(nn.Module):
     def __init__(
         self, 
         dim, 
-        ff_mult = 4, 
+        ff_mult=4, 
         dropout=0.
     ):
         super().__init__()
@@ -158,20 +159,17 @@ class Attention(nn.Module):
         q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
 
         # split heads
-        # they use multi-query single-key-value attention, yet another Noam Shazeer paper
-        # they found no performance loss past a certain scale, and more efficient decoding obviously
-        # https://arxiv.org/abs/1911.02150
 
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+
+        # scale
+
+        q = q * self.scale
 
         # rotary embeddings
 
         positions = self.get_rotary_embedding(n, device)
         q, k = map(lambda t: apply_rotary_pos_emb(positions, t), (q, k))
-
-        # scale
-
-        q = q * self.scale
 
         # similarity
 
@@ -195,6 +193,7 @@ class Attention(nn.Module):
         out = rearrange(out, "b h n d -> b n (h d)")
         return self.attn_out(out)
 
+
 # parallel attention and feedforward with residual
 # discovered by Wang et al + EleutherAI from GPT-J fame
 
@@ -214,8 +213,6 @@ class ParallelBlock(nn.Module):
     def forward(self, x):
         return self.ffn(x) + self.attn(x)
 
-# transformer
-
 class Transformer(nn.Module):
     def __init__(
         self, 
@@ -223,7 +220,8 @@ class Transformer(nn.Module):
         depth, 
         heads, 
         dim_head, 
-        ff_mult=4, 
+        ff_mult=4,
+        dropout=0., 
         scale_residual=1.
     ):
         super().__init__()
@@ -231,7 +229,7 @@ class Transformer(nn.Module):
 
         for _ in range(depth):
             self.layers.append(
-                PostNormResidual(dim, ParallelBlock(dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult, dropout=0.), scale_residual=scale_residual)
+                PostNormResidual(dim, ParallelBlock(dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult, dropout=dropout), scale_residual=scale_residual)
             )
 
     def forward(self, x):
@@ -250,17 +248,20 @@ class GLM(nn.Module):
         depth, 
         dim_head=64, 
         heads=8, 
-        ff_mult=4
+        ff_mult=4,
+        scale_residual=None,
     ):
         super().__init__()
 
-        #dec_scale_residual = default(dec_scale_residual, (3 * depth) ** 0.25)
+        scale_residual = default(scale_residual, (3 * depth) ** 0.25)
 
         self.net = nn.Sequential(
             nn.Embedding(num_tokens, dim),
-            Transformer(dim=dim, depth=depth, heads=heads, dim_head=dim_head, ff_mult=ff_mult),
+            Transformer(dim=dim, depth=depth, heads=heads, dim_head=dim_head, ff_mult=ff_mult, scale_residual=scale_residual),
             nn.Linear(dim, num_tokens)
         )
+
+        deepnorm_init(self.net, (12 * depth) ** -0.25)
 
     def forward(self, x):
         # they used embedding weight tied projection out to logits, not common, but works
