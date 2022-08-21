@@ -30,7 +30,7 @@ class PostNormResidual(nn.Module):
 
 # deepnet init
 # Implementation of DeepNorm generally follows its paper: 
-# xavier normal initialization with a scaling factor is applied to ffn, v_proj, out_proj.
+# xavier normal initialization with a (2N)^(-1/2) scaling factor is applied to ffn, v_proj, out_proj.
 
 def deepnorm_init(transformer, beta, module_name_match_list = ['.ff_out.', '.v_out', '.attn_out']):
     for name, module in transformer.named_modules():
@@ -102,7 +102,7 @@ class FeedForward(nn.Module):
 
 
 # Attention
-# Use a standard multi-head self-attention instead of sharing key/value projections.
+# Use standard multi-head self-attention instead of sharing key/value projections.
 # all dense layer have bias.
 
 class Attention(nn.Module):
@@ -262,11 +262,14 @@ class GLM(nn.Module):
         ff_mult=4,
         scale_residual=None,
         use_deepnet=True,
+        alpha=0.1,
     ):
         super().__init__()
 
+        self.alpha = alpha
+
         if use_deepnet:
-            scale_residual = default(scale_residual, (2 * depth) ** -0.25)
+            scale_residual = default(scale_residual, (3 * depth) ** 0.25)
 
         self.emb = nn.Embedding(num_tokens, dim)
 
@@ -293,7 +296,7 @@ class GLM(nn.Module):
         embedding = embedding * alpha + embedding.detach() * (1 - alpha)
         They found alpha=0.1 to be best for GLM-130B.
         """
-        embed = self.emb(x) * 0.1 + self.emb(x).detach() * (1 - 0.1)
+        embed = self.emb(x) * self.alpha + self.emb(x).detach() * (1 - self.alpha)
         x = self.transformer(embed)
         logits = self.to_logits(x)
 
