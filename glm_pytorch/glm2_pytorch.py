@@ -78,11 +78,16 @@ class GEGLU(nn.Module):
 # FeedFoward
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, ff_mult = 4, dropout=0.):
+    def __init__(
+        self, 
+        dim, 
+        ff_mult = 4, 
+        dropout=0.
+    ):
         super().__init__()
         ff_inner_dim = int(dim * ff_mult)
         
-        self.ff = nn.Sequential(
+        self.ff_out = nn.Sequential(
             nn.Linear(dim, ff_inner_dim * 2),
             GEGLU(),
             nn.Dropout(dropout),
@@ -90,13 +95,18 @@ class FeedForward(nn.Module):
         )
 
     def forward(self, x):
-        return self.ff(x)
+        return self.ff_out(x)
 
 
 # Attention
 
 class Attention(nn.Module):
-    def __init__(self, dim, dim_head=64, heads=8):
+    def __init__(
+        self, 
+        dim, 
+        dim_head=64, 
+        heads=8
+    ):
         super().__init__()
 
         attn_inner_dim = dim_head * heads
@@ -105,9 +115,9 @@ class Attention(nn.Module):
         self.scale = dim_head**-0.5
         self.rotary_emb = RotaryEmbedding(dim_head)
 
-        self.to_q = nn.Linear(dim, attn_inner_dim, bias = False)
-        self.to_k = nn.Linear(dim, attn_inner_dim, bias=False)
-        self.to_v = nn.Linear(dim, attn_inner_dim, bias=False)
+        self.to_q = nn.Linear(dim, attn_inner_dim)
+        self.to_k = nn.Linear(dim, attn_inner_dim)
+        self.to_v = nn.Linear(dim, attn_inner_dim)
 
         self.attn_out = nn.Linear(attn_inner_dim, dim)
 
@@ -189,7 +199,14 @@ class Attention(nn.Module):
 # discovered by Wang et al + EleutherAI from GPT-J fame
 
 class ParallelBlock(nn.Module):
-    def __init__(self, dim, dim_head=64, heads=8, ff_mult=4, dropout=0.):
+    def __init__(
+        self, 
+        dim, 
+        dim_head=64, 
+        heads=8, 
+        ff_mult=4, 
+        dropout=0.
+    ):
         super().__init__()
         self.attn = Attention(dim, dim_head=dim_head, heads=heads)
         self.ffn = FeedForward(dim, ff_mult=ff_mult, dropout=dropout)
@@ -214,11 +231,7 @@ class Transformer(nn.Module):
 
         for _ in range(depth):
             self.layers.append(
-                PostNormResidual(
-                    dim, 
-                    ParallelBlock(dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult, dropout=0.),
-                    scale_residual=scale_residual
-                )
+                PostNormResidual(dim, ParallelBlock(dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult, dropout=0.), scale_residual=scale_residual)
             )
 
     def forward(self, x):
