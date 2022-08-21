@@ -75,15 +75,29 @@ class GEGLU(nn.Module):
         return x * F.gelu(gate)
 
 
+class MLP(nn.Module):
+    def __init__(self, dim, ff_mult = 4, dropout=0.):
+        super().__init__()
+        ff_inner_dim = int(dim * ff_mult)
+        
+        self.ff = nn.Sequential(
+            nn.Linear(dim, ff_inner_dim),
+            GEGLU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_inner_dim, dim),
+        )
+
+    def forward(self, x):
+        return self.ff(x)
+
 # parallel attention and feedforward with residual
 # discovered by Wang et al + EleutherAI from GPT-J fame
 
-class ParallelAttention(nn.Module):
-    def __init__(self, dim, dim_head=64, heads=8, ff_mult=4):
+class Attention(nn.Module):
+    def __init__(self, dim, dim_head=64, heads=8):
         super().__init__()
 
         attn_inner_dim = dim_head * heads
-        ff_inner_dim = dim * ff_mult
 
         self.heads = heads
         self.scale = dim_head**-0.5
@@ -92,14 +106,8 @@ class ParallelAttention(nn.Module):
         self.to_q = nn.Linear(dim, attn_inner_dim, bias = False)
         self.to_k = nn.Linear(dim, dim_head, bias=False)
         self.to_v = nn.Linear(dim, dim_head, bias=False)
-        self.to_ff = nn.Linear(dim, ff_inner_dim * 2, bias=False)
 
         self.attn_out = nn.Linear(attn_inner_dim, dim)
-
-        self.ff_out = nn.Sequential(
-            GEGLU(),
-            nn.Linear(ff_inner_dim, dim)
-        )
 
         # for caching causal mask and rotary embeddings
 
@@ -135,7 +143,7 @@ class ParallelAttention(nn.Module):
 
         # attention queries, keys, values, and feedforward inner
 
-        q, k, v, ff = self.to_q(x), self.to_k(x), self.to_v(x), self.to_ff(x)
+        q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
 
         # split heads
         # they use multi-query single-key-value attention, yet another Noam Shazeer paper
@@ -173,7 +181,7 @@ class ParallelAttention(nn.Module):
         # merge heads
 
         out = rearrange(out, "b h n d -> b n (h d)")
-        return self.attn_out(out) + self.ff_out(ff)
+        return self.attn_out(out)
 
 
 # transformer
@@ -193,7 +201,7 @@ class ParallelTransformer(nn.Module):
 
         for _ in range(depth):
             self.layers.append(
-                PostNormResidual(dim, ParallelAttention(dim=dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult), scale_residual=scale_residual)
+                PostNormResidual(dim, Attention(dim=dim, dim_head=dim_head, heads=heads), scale_residual=scale_residual)
             )
 
     def forward(self, x):
