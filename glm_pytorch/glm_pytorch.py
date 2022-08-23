@@ -11,8 +11,9 @@ def exists(val):
 def default(val, d):
     return val if exists(val) else d
 
+
 # normalization
-# they use layernorm with bias, different from PaLM
+# they use layernorm with bias
 
 class PostNormResidual(nn.Module):
     def __init__(self, dim, fn, scale_residual = 1.):
@@ -28,6 +29,8 @@ class PostNormResidual(nn.Module):
 
 
 # deepnet init
+# Implementation of DeepNorm generally follows its paper: 
+# xavier normal initialization with a (2N)^(-1/2) scaling factor is applied to ffn, v_proj, out_proj.
 
 def deepnorm_init(transformer, beta, module_name_match_list = ['.ff_out.', '.v_out', '.attn_out']):
     for name, module in transformer.named_modules():
@@ -75,31 +78,53 @@ class GEGLU(nn.Module):
         return x * F.gelu(gate)
 
 
-# parallel attention and feedforward with residual
-# discovered by Wang et al + EleutherAI from GPT-J fame
+# FeedFoward
 
-class ParallelAttention(nn.Module):
-    def __init__(self, dim, dim_head=64, heads=8, ff_mult=4):
+class FeedForward(nn.Module):
+    def __init__(
+        self, 
+        dim, 
+        ff_mult=4, 
+        dropout=0.
+    ):
+        super().__init__()
+        ff_inner_dim = int(dim * ff_mult)
+        
+        self.ff_out = nn.Sequential(
+            nn.Linear(dim, ff_inner_dim * 2),
+            GEGLU(),
+            nn.Dropout(dropout),
+            nn.Linear(ff_inner_dim, dim),
+        )
+
+    def forward(self, x):
+        return self.ff_out(x)
+
+
+# Attention
+# Use standard multi-head self-attention with RoPE
+# All dense layer have bias.
+
+class Attention(nn.Module):
+    def __init__(
+        self, 
+        dim, 
+        dim_head=64, 
+        heads=8
+    ):
         super().__init__()
 
         attn_inner_dim = dim_head * heads
-        ff_inner_dim = dim * ff_mult
 
         self.heads = heads
         self.scale = dim_head**-0.5
         self.rotary_emb = RotaryEmbedding(dim_head)
 
-        self.to_q = nn.Linear(dim, attn_inner_dim, bias = False)
-        self.to_k = nn.Linear(dim, dim_head, bias=False)
-        self.to_v = nn.Linear(dim, dim_head, bias=False)
-        self.to_ff = nn.Linear(dim, ff_inner_dim * 2, bias=False)
+        self.to_q = nn.Linear(dim, attn_inner_dim)
+        self.to_k = nn.Linear(dim, attn_inner_dim)
+        self.to_v = nn.Linear(dim, attn_inner_dim)
 
         self.attn_out = nn.Linear(attn_inner_dim, dim)
-
-        self.ff_out = nn.Sequential(
-            GEGLU(),
-            nn.Linear(ff_inner_dim, dim)
-        )
 
         # for caching causal mask and rotary embeddings
 
@@ -135,27 +160,24 @@ class ParallelAttention(nn.Module):
 
         # attention queries, keys, values, and feedforward inner
 
-        q, k, v, ff = self.to_q(x), self.to_k(x), self.to_v(x), self.to_ff(x)
+        q, k, v = self.to_q(x), self.to_k(x), self.to_v(x)
 
         # split heads
-        # they use multi-query single-key-value attention, yet another Noam Shazeer paper
-        # they found no performance loss past a certain scale, and more efficient decoding obviously
-        # https://arxiv.org/abs/1911.02150
 
-        q = rearrange(q, "b n (h d) -> b h n d", h=h)
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = h), (q, k, v))
+
+        # scale
+
+        q = q * self.scale
 
         # rotary embeddings
 
         positions = self.get_rotary_embedding(n, device)
         q, k = map(lambda t: apply_rotary_pos_emb(positions, t), (q, k))
 
-        # scale
-
-        q = q * self.scale
-
         # similarity
 
-        sim = einsum("b h i d, b j d -> b h i j", q, k)
+        sim = einsum("b h i d, b h j d -> b h i j", q, k)
 
         # causal mask
 
@@ -168,24 +190,44 @@ class ParallelAttention(nn.Module):
 
         # aggregate values
 
-        out = einsum("b h i j, b j d -> b h i d", attn, v)
+        out = einsum("b h i j, b h j d -> b h i d", attn, v)
 
         # merge heads
 
         out = rearrange(out, "b h n d -> b n (h d)")
-        return self.attn_out(out) + self.ff_out(ff)
+        return self.attn_out(out)
 
 
-# transformer
+# parallel attention and feedforward
+# discovered by Wang et al + EleutherAI from GPT-J fame
 
-class ParallelTransformer(nn.Module):
+class ParallelBlock(nn.Module):
+    def __init__(
+        self, 
+        dim, 
+        dim_head=64, 
+        heads=8, 
+        ff_mult=4, 
+        dropout=0.
+    ):
+        super().__init__()
+        self.attn = Attention(dim, dim_head=dim_head, heads=heads)
+        self.ffn = FeedForward(dim, ff_mult=ff_mult, dropout=dropout)
+
+    def forward(self, x):
+        return self.ffn(x) + self.attn(x)
+
+# transformer with scale residual connection and post normalization
+
+class Transformer(nn.Module):
     def __init__(
         self, 
         dim, 
         depth, 
         heads, 
         dim_head, 
-        ff_mult=4, 
+        ff_mult=4,
+        dropout=0., 
         scale_residual=1.
     ):
         super().__init__()
@@ -193,7 +235,11 @@ class ParallelTransformer(nn.Module):
 
         for _ in range(depth):
             self.layers.append(
-                PostNormResidual(dim, ParallelAttention(dim=dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult), scale_residual=scale_residual)
+                PostNormResidual(
+                    dim, 
+                    ParallelBlock(dim, dim_head=dim_head, heads=heads, ff_mult=ff_mult, dropout=dropout), 
+                    scale_residual=scale_residual
+                )
             )
 
     def forward(self, x):
@@ -202,7 +248,7 @@ class ParallelTransformer(nn.Module):
         return x
 
 
-# Model
+# Model with deepnorm
 
 class GLM(nn.Module):
     def __init__(
@@ -212,24 +258,55 @@ class GLM(nn.Module):
         depth, 
         dim_head=64, 
         heads=8, 
-        ff_mult=4
+        ff_mult=4,
+        scale_residual=None,
+        use_deepnorm=True,
+        alpha=0.1,
     ):
         super().__init__()
 
-        #dec_scale_residual = default(dec_scale_residual, (3 * depth) ** 0.25)
+        self.alpha = alpha
 
-        self.net = nn.Sequential(
-            nn.Embedding(num_tokens, dim),
-            ParallelTransformer(dim=dim, depth=depth, heads=heads, dim_head=dim_head, ff_mult=ff_mult),
-            nn.Linear(dim, num_tokens)
+        if use_deepnorm:
+            scale_residual = default(scale_residual, (3 * depth) ** 0.25)
+
+        assert scale_residual is not None, 'Provide scale_residual if not using DeepNorm'
+
+        self.emb = nn.Embedding(num_tokens, dim)
+
+        self.transformer = Transformer(
+            dim=dim, 
+            depth=depth, 
+            heads=heads, 
+            dim_head=dim_head, 
+            ff_mult=ff_mult, 
+            scale_residual=scale_residual
         )
+        
+        self.to_logits = nn.Linear(dim, num_tokens)
+
+        if use_deepnorm:
+            deepnorm_init(self.transformer, (2 * depth) ** -0.25)
+
+        # they used embedding weight tied projection out to logits
+        self.emb.weight = self.to_logits.weight
+        nn.init.normal_(self.emb.weight, std=0.02)
 
     def forward(self, x):
-        # they used embedding weight tied projection out to logits, not common, but works
-        self.net[-1].weight = self.net[0].weight
+        """
+        The embedding layer's gradient norm is remarkably larger than others in the early stage of training. 
+        Most collapses and spikes occur after gradient norm surges up.
+        Since the fundamental problem is the drastic gradient of the input embedding layer, 
+        shrink the gradient for the input embedding layer to variable alpha: 
+            embedding = embedding * alpha + embedding.detach() * (1 - alpha)
+        They found alpha=0.1 to be best for GLM-130B.
+        """
 
-        nn.init.normal_(self.net[0].weight, std=0.02)
-        return self.net(x)
+        embed = self.emb(x) * self.alpha + self.emb(x).detach() * (1 - self.alpha)
+        x = self.transformer(embed)
+        logits = self.to_logits(x)
+        
+        return logits
 
 
 if __name__ == "__main__":
@@ -240,6 +317,7 @@ if __name__ == "__main__":
         depth = 1,
         heads = 8,
         dim_head = 64,
+        use_deepnorm=True,
     )
 
     tokens = torch.randint(0, 20000, (1, 2048))
